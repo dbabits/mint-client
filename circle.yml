@@ -1,6 +1,12 @@
 machine:
   environment:
     GOPATH: /home/ubuntu/.go_workspace
+  post:
+    - rm -rf ${GOPATH%%:*}/src/github.com/${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}
+    - mkdir -p ${GOPATH%%:*}/src/github.com/${CIRCLE_PROJECT_USERNAME}
+    - cp -r ${HOME}/${CIRCLE_PROJECT_REPONAME} ${GOPATH%%:*}/src/github.com/${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}
+    - git config --global user.email "billings@erisindustries.com"
+    - git config --global user.name "Billings the Bot"
 
 dependencies:
   pre:

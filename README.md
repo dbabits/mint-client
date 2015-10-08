@@ -1,3 +1,7 @@
+Master [![Circle CI](https://circleci.com/gh/eris-ltd/mint-client/tree/master.svg?style=svg)](https://circleci.com/gh/eris-ltd/mint-client)
+ Develop [![Circle CI (develop)](https://circleci.com/gh/eris-ltd/mint-client/tree/develop.svg?style=svg)](https://circleci.com/gh/eris-ltd/mint-client)
+
+
 # mint-client
 Command line interfaces for low-level conversations with tendermint chains
 

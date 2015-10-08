@@ -138,7 +138,7 @@ func testKnownCSV(csvFile string, csv GenDoc) error {
 		return err
 	}
 
-	genBytes, err := coreKnown(chainID, path.Join(DirFlag, "accounts.csv"))
+	genBytes, err := coreKnown(chainID, path.Join(DirFlag, "accounts.csv"), "")
 	if err != nil {
 		return err
 	}
