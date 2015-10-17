@@ -2,6 +2,7 @@ machine:
   environment:
     GOPATH: /home/ubuntu/.go_workspace
     REPO: ${GOPATH}/src/github.com/${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}
+    ERIS_PULL_APPROVE: true
   post:
     - echo "GOPATH $GOPATH and REPO $REPO"
     - rm -rf $REPO
@@ -21,3 +22,4 @@ test:
   override:
     - go test ./...
     - curl https://raw.githubusercontent.com/eris-ltd/integration-tests/master/test.sh > $HOME/test.sh && bash $HOME/test.sh $REPO/DOCKER/linked
+
