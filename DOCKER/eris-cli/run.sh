@@ -1,5 +1,11 @@
 #! /bin/bash
 
+# init the eris cli
+export ERIS_PULL_APPROVE=true
+cd /home/eris/.eris
+yes | eris init
+yes | eris init
+
 #default
 NUM_NODES=1
 
