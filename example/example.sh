@@ -98,7 +98,6 @@ mintconfig > ~/.eris/blockchains/$CHAIN_ID/config.toml
 erisdb ~/.eris/blockchains/$CHAIN_ID  &> ~/.eris/blockchains/$CHAIN_ID/log &
 
 # start the keys server (for signing transactions)
-#eris-keys server &
 eris-keys server  &> ~/.eris/blockchains/$CHAIN_ID/eris-keys.log &
 
 # let everything start up
