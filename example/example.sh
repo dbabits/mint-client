@@ -14,6 +14,7 @@
 #  8) Query the contract without sending a transaction
 
 
+
 ########################################
 ## Step 0 - Installs		      ##
 ########################################
@@ -28,16 +29,22 @@
 
 if [[ "$NO_INSTALL" == "" ]]; then
 	# install the keys daemon for signing transactions
+        if [ `which yum 2>/dev/null` ]; then
+          sudo yum install -y gmp-devel #dmitry: aws package name. eris-keys needs <gmp.h>
+        fi
+
 	go get github.com/eris-ltd/eris-keys
 
 	# install the mint-client tools
 	go get github.com/eris-ltd/mint-client/...
 
 	# install the erisdb (requires branch 0.10.3)
-	git clone https://github.com/eris-ltd/erisdb $GOPATH/src/github.com/eris-ltd/erisdb
-	cd $GOPATH/src/github.com/eris-ltd/erisdb
+	#git clone https://github.com/eris-ltd/erisdb $GOPATH/src/github.com/eris-ltd/erisdb #dmitry-wrong,needs dash! will fail to build!
+	#cd $GOPATH/src/github.com/eris-ltd/erisdb #dmitry. same
+	git clone https://github.com/eris-ltd/eris-db $GOPATH/src/github.com/eris-ltd/eris-db
+	cd $GOPATH/src/github.com/eris-ltd/eris-db
 	git checkout 0.10.3
-	go install ./cmd/erisdb
+	go install ./cmd/erisdb #dmitry: this installs into $GOPATH/bin/erisdb - inconsistent naming convention. Everything else has eris-..
 
 	# install the eris-abi tool (required for formatting transactions to contracts)
 	go get github.com/eris-ltd/eris-abi/cmd/eris-abi
@@ -53,6 +60,9 @@ CHAIN_ID="mychain"
 # create genesis file and validator's private key
 # and store them in ~/.eris/blockchains/$CHAIN_ID
 mintgen random 1 $CHAIN_ID
+    #Generating accounts ...
+    #genesis.json and priv_validator.json files saved in /home/ec2-user/.eris/blockchains/mychain
+
 
 # create a config file
 mintconfig > ~/.eris/blockchains/$CHAIN_ID/config.toml
@@ -61,7 +71,8 @@ mintconfig > ~/.eris/blockchains/$CHAIN_ID/config.toml
 erisdb ~/.eris/blockchains/$CHAIN_ID  &> ~/.eris/blockchains/$CHAIN_ID/log &
 
 # start the keys server (for signing transactions)
-eris-keys server &
+#eris-keys server &
+eris-keys server  &> ~/.eris/blockchains/$CHAIN_ID/eris-keys.log &
 
 # let everything start up
 sleep 2
@@ -91,7 +102,8 @@ contract MyContract {
 EOM
 
 # the solidity code needs to be in base64 for the compile server
-CODE64=`echo $CODE | base64`
+#CODE64=`echo $CODE | base64`
+CODE64=`echo $CODE | base64 --wrap=0`
 
 # json data for the curl request to the compile server
 read -r -d '' JSON_DATA << EOM
@@ -109,6 +121,7 @@ URL="https://compilers.eris.industries:8091/compile"
 RESULT=`curl --silent -X POST -d "${JSON_DATA}" $URL --header "Content-Type:application/json"`
 
 # the compile server returns the bytecode (in base64) and the abi (json)
+# sudo yum install jq
 BYTECODE=`echo $RESULT | jq .bytecode`
 ABI=`echo $RESULT | jq .abi`
 
@@ -118,13 +131,19 @@ BYTECODE="${BYTECODE#\"}"
 
 # convert bytecode to hex
 # NOTE: this works on mac, but base64 is slightly different on linux (need -d rather than -D)
-BYTECODE=`echo $BYTECODE | base64 -D | hexdump -ve '1/1 "%.2X"'`
+if [ "$(uname)" == "Darwin" ]; then
+   BYTECODE=`echo $BYTECODE | base64 -D | hexdump -ve '1/1 "%.2X"'`
+elif [ "$(uname)" == "Linux" ]; then
+   BYTECODE=`echo $BYTECODE | base64 --decode | hexdump -ve '1/1 "%.2X"'`
+else
+   echo "ERROR: Uknown OS!!"
+fi
 
 # unescape quotes in the json and write the ABI to file
 # TODO: fix the lllc-server so this doesn't happen
 ABI=`eval echo $ABI` 
 ABI=`echo $ABI | jq .`
-echo $ABI > add.abi
+#echo $ABI > add.abi #dmitry:we can manage without this file in cwd, see later
 
 echo "BYTE CODE:"
 echo $BYTECODE
@@ -276,9 +295,9 @@ echo ""
 # because BYTECODE contains additional code for the actual deployment (the init/constructor sequence of a contract)
 # so we only ensure that BYTECODE contains CODE
 if [[ "$BYTECODE" == *"$CODE"* ]]; then
-	echo "THE CODE WAS DEPLOYED CORRECTLY!"
+	echo 'THE CODE WAS DEPLOYED CORRECTLY!' #dmitry:don't use " with !: my bash doesnt like it: -bash: !": event not found
 else
-	echo "THE CODE AT THE CONTRACT ADDRESS IS NOT WHAT WE DEPLOYED!"
+	echo 'THE CODE AT THE CONTRACT ADDRESS IS NOT WHAT WE DEPLOYED!'
 	echo "Deployed: $BYTECODE"
 	echo "Got: $CODE"
 fi
@@ -304,7 +323,13 @@ SUM_EXPECTED=$(( $ARG1 + $ARG2 ))
 # the function identifier is the first 4 bytes of the sha3 hash of a canonical form of the function signature
 # details are here: https://github.com/ethereum/wiki/wiki/Ethereum-Contract-ABI
 # we use the eris-abi tool to make this simple:
-DATA=`eris-abi pack --input file add.abi $FUNCTION $ARG1 $ARG2`
+# dmitry: TODO: info messages make it in the output the first time around(if ~/.eris/abi does not exist) They need to go to stderr:
+#[ec2-user@ip-172-31-38-111 eris-db]$ echo $DATA
+#Abi directory tree incomplete... Creating it... Directory tree built! a5f3c23b00000000000000000000000000000000000000000000000000000000000000190000000000000000000000000000000000000000000000000000000000000025
+
+#DATA=`eris-abi pack --input file add.abi $FUNCTION $ARG1 $ARG2` #dmitry: no need in extra file in cwd
+DATA=`eris-abi pack --input file <(echo $ABI) $FUNCTION $ARG1 $ARG2`
+DATA=`eris-abi pack --input file <(echo $ABI) $FUNCTION $ARG1 $ARG2` #dmitry: run it second time in case first time we got info messages into DATA (Abi directory tree incomplete... Creating it... Directory tree built!)
 
 echo "DATA FOR CONTRACT CALL:"
 echo $DATA
@@ -331,7 +356,7 @@ if [[ "$SUM_GOT" != "$SUM_EXPECTED" ]]; then
 	echo "GOT $SUM_GOT"
 	echo "EXPECTED $SUM_EXPECTED"
 else
-	echo "SMART CONTRACT ADDITION TX SUCCEEDED!"
+	echo 'SMART CONTRACT ADDITION TX SUCCEEDED!' #dmitry:don't use " with !: my bash doesnt like it: -bash: !": event not found
 	echo "$ARG1 + $ARG2 = $SUM_GOT"
 fi
 echo ""
@@ -359,6 +384,6 @@ if [[ "$SUM_GOT" != "$SUM_EXPECTED" ]]; then
 	echo "GOT $SUM_GOT"
 	echo "EXPECTED $SUM_EXPECTED"
 else
-	echo "SMART CONTRACT ADDITION QUERY SUCCEEDED!"
+	echo 'SMART CONTRACT ADDITION QUERY SUCCEEDED!'
 	echo "$ARG1 + $ARG2 = $SUM_GOT"
 fi
