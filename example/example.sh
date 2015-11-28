@@ -38,9 +38,18 @@ usage() {
     - have jq installed (https://stedolan.github.io/jq/download)
 
    Usage: $0 -i -c <chain name[$CHAIN_ID]>  -h  
-          -i  do software installs only and exit;
-          -c  set chain id, default is $CHAIN_ID
-          -h  display this message
+
+            while getopts "c:isd:t:ph" opt; do
+                case "$opt" in
+                    c) CHAIN_ID="$OPTARG";; #default is $CHAIN_ID
+                    i) do_installs;;  #install software
+                    s) kill_all && start_chain;; #delete $CHAIN_ID directory and re-initialize
+                    d) compile "$OPTARG" && create_contract_tx && broadcast_tx && wait_for_confirmation && verify_bytecode;;  
+                    t) call_contract_w_tran "$OPTARG";; #call the contract, creating and committing transaction to the chain
+                    p) call_contract_no_tran;;#call the contract, without affecting blockchain state
+                    h|*) usage;;
+                esac
+            done
 
    Sample contract used:
           $CONTRACT_CODE
@@ -85,6 +94,14 @@ do_installs() {
     exit 0;
 }
 
+## Step 0.1 - kill all(reinit)
+kill_all() {
+    echo "kill_all(): killall erisdb;killall eris-keys; rm -rf ~/.eris/blockchains/$CHAIN_ID"
+    killall erisdb
+    killall eris-keys
+    rm -rf ~/.eris/blockchains/$CHAIN_ID
+
+}
 
 ########################################
 ## Step 1 - Start a chain	      ##
@@ -125,7 +142,9 @@ start_chain() {
 
 
 compile() {
-    echo "compile()"
+    ADDRESS=$1
+    local contract_name=$(echo $CONTRACT_CODE|grep contract|cut -f2 -d ' ')
+    echo "compile() ADDRESS=$ADDRESS, contract_name=$contract_name"
     # compile that baby! the solidity code needs to be in base64 for the compile server. And at least on RHEL Linux, base64 wraps long line unless --wrap=0 is passed
     RESULT=$(curl --silent -X POST --data @- --header "Content-Type:application/json" https://compilers.eris.industries:8091/compile <<EOF
     {
@@ -157,8 +176,15 @@ EOF
     ABI=`eval echo $ABI` 
     ABI=`echo $ABI | jq .`
 
+    ABIFILE=~/.eris/blockchains/$CHAIN_ID/$contract_name.abi
+    touch "$ABIFILE"
+    echo ABI~$ABI > $ABIFILE
+    echo ADDRESS~$ADDRESS >>$ABIFILE
+
     echo "BYTE CODE:$BYTECODE"
-    echo "ABI:$ABI"
+    echo "ABI:$ABI, saved to $ABIFILE"
+    ls -l $ABIFILE
+    #ABI is needed later in order to call a contract! (must be preserved between compile and execute calls - BAD!)
 }
 
 
@@ -169,7 +195,13 @@ EOF
 create_contract_tx() {
     echo "create_contract_tx()"
     # to create the transaction, we need to know the account's nonce, so we fetch from the blockchain using simple HTTP
-    NONCE=`curl -X GET 'http://'"$ERISDB_HOST"'/get_account?address="'"$ADDRESS"'"' --silent | jq ."result"[1].account.sequence`
+    read -r -d '' cmd <<EOF
+    curl -X GET http://$ERISDB_HOST/get_account?address='"$ADDRESS"' --silent | jq ."result"[1].account.sequence
+EOF
+
+    echo "cmd=$cmd"
+    NONCE=`eval "$cmd"`
+    #NONCE=`curl -X GET 'http://'"$ERISDB_HOST"'/get_account?address="'"$ADDRESS"'"' --silent | jq ."result"[1].account.sequence`
     echo "NONCE:$NONCE"
 
     # some variables for the call tx
@@ -201,7 +233,8 @@ EOM
     )
 
     echo "SIGNATURE:$SIGNATURE"
-    # we're going to need the pubkey (the pubkey can also be fetched via a curl request to $ERIS_KEYS_HOST/pub with post body {"addr:"$ADDRESS"}
+    # we're going to need the pubkey 
+    #(the pubkey can also be fetched via a curl request to $ERIS_KEYS_HOST/pub with post body {"addr":"$ADDRESS"} 
     PUBKEY=`eris-keys pub --addr=$ADDRESS`
 
     # now we can actually construct the transaction (it's just the sign bytes plus the pubkey and signature!)
@@ -241,7 +274,8 @@ broadcast_tx() {
     CONTRACT_ADDRESS="${CONTRACT_ADDRESS%\"}"
     CONTRACT_ADDRESS="${CONTRACT_ADDRESS#\"}"
 
-    echo "CONTRACT ADDRESS:$CONTRACT_ADDRESS"
+    echo "CONTRACT_ADDRESS:$CONTRACT_ADDRESS"
+    echo "CONTRACT_ADDRESS~$CONTRACT_ADDRESS" >> $ABIFILE
 }
 
 #############################################
@@ -294,7 +328,14 @@ verify_bytecode(){
 ## Step 7 - Create and Sign Transaction for Talking to Contract ##
 ##################################################################
 call_contract_w_tran() {
-    echo "call_contract_w_tran()"
+    local abifile=$1
+    if [ ! -r "$abifile" ]; then echo "ERROR: abifile $abifile does not exist, exiting 1"; exit 1;fi
+
+    local ABI=`cat $abifile|grep -w ABI|cut -f2 -d~`
+    local CONTRACT_ADDRESS=`cat $abifile|grep -w CONTRACT_ADDRESS|cut -f2 -d~`
+    local ADDRESS=`cat $abifile|grep -w ADDRESS|cut -f2 -d~`
+    echo "call_contract_w_tran() CONTRACT_ADDRESS=$CONTRACT_ADDRESS, abifile=$abifile,ABI=$ABI"
+
     # some variables for the call tx
     FEE=0
     GAS=1000
@@ -320,14 +361,29 @@ call_contract_w_tran() {
     DATA=`eris-abi pack --input file <(echo $ABI) $FUNCTION $ARG1 $ARG2`
     DATA=`eris-abi pack --input file <(echo $ABI) $FUNCTION $ARG1 $ARG2` 
 
-    echo "DATA FOR CONTRACT CALL:$DATA"
+    #can also do: PUBKEY=`eris-keys pub --addr=$ADDRESS`
+    PUBKEY=$(curl -X POST --data @- --silent $ERIS_KEYS_HOST/pub <<EOF |jq .Response
+    {"addr":"$ADDRESS"} 
+EOF
+    )
+    # strip quotes
+    PUBKEY="${PUBKEY%\"}"
+    PUBKEY="${PUBKEY#\"}"
+
+    echo "PUBKEY=$PUBKEY.  DATA FOR CONTRACT CALL:$DATA"
 
     # since we've already shown how to create a transaction, sign it, and send it to the blockchain using curl,  now we do it simply using the mintx tool.
     # the --sign and --broadcast flags ensure the transaction is signed (by the private key associated with --pubkey)
     # and broadcast to the chain. the --wait flag waits until the transaction is confirmed
-    RESULT=`mintx call --node-addr=$ERISDB_HOST --chainID=$CHAIN_ID --to=$CONTRACT_ADDRESS --amt=$AMOUNT --fee=$FEE --gas=$GAS --data=$DATA --pubkey=$PUBKEY --sign --broadcast --wait`
+    read -r -d '' cmd <<EOF
+    mintx call --node-addr=$ERISDB_HOST --chainID=$CHAIN_ID --to=$CONTRACT_ADDRESS --amt=$AMOUNT --fee=$FEE --gas=$GAS --data=$DATA --pubkey=$PUBKEY --sign --broadcast --wait
+EOF
 
-    echo "$RESULT"
+    echo "cmd=$cmd"
+    RESULT=`eval "$cmd"`
+    #RESULT=`mintx call --node-addr=$ERISDB_HOST --chainID=$CHAIN_ID --to=$CONTRACT_ADDRESS --amt=$AMOUNT --fee=$FEE --gas=$GAS --data=$DATA --pubkey=$PUBKEY --sign --broadcast --wait`
+
+    echo "result=$RESULT"
 
     # grab the return value
     SUM_GOT=`echo "$RESULT" | grep "Return Value:" | awk '{print $3}' | sed 's/^0*//'`
@@ -372,13 +428,14 @@ call_contract_no_tran() {
     fi
 }
 
-while getopts "c:idth" opt; do
+while getopts "c:isd:t:ph" opt; do
     case "$opt" in
-        c) CHAIN_ID="$OPTARG";;
-        i) do_installs;;
-        d) start_chain && compile && create_contract_tx && broadcast_tx && wait_for_confirmation && verify_bytecode;;  
-        t) call_contract_w_tran;;
-        p) call_contract_no_tran;;
+        c) CHAIN_ID="$OPTARG";; #default is $CHAIN_ID
+        i) do_installs;;  #install software
+        s) kill_all && start_chain;; #delete $CHAIN_ID directory and re-initialize
+        d) compile "$OPTARG" && create_contract_tx && broadcast_tx && wait_for_confirmation && verify_bytecode;;  
+        t) call_contract_w_tran "$OPTARG";; #call the contract, creating and committing transaction to the chain
+        p) call_contract_no_tran;;#call the contract, without affecting blockchain state
         h|*) usage;;
     esac
 done
