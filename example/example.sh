@@ -39,17 +39,17 @@ usage() {
 
    Usage: $0 -i -c <chain name[$CHAIN_ID]>  -h  
 
-            while getopts "c:isd:t:ph" opt; do
-                case "$opt" in
-                    c) CHAIN_ID="$OPTARG";; #default is $CHAIN_ID
-                    i) do_installs;;  #install software
-                    s) kill_all && start_chain;; #delete $CHAIN_ID directory and re-initialize
-                    d) compile "$OPTARG" && create_contract_tx && broadcast_tx && wait_for_confirmation && verify_bytecode;;  
-                    t) call_contract_w_tran "$OPTARG";; #call the contract, creating and committing transaction to the chain
-                    p) call_contract_no_tran;;#call the contract, without affecting blockchain state
-                    h|*) usage;;
-                esac
-            done
+        while getopts "c:isd:t:p:h" opt; do
+            case "$opt" in
+                c) CHAIN_ID="$OPTARG";; #default is $CHAIN_ID
+                i) do_installs;;  #install software
+                s) kill_all && start_chain;; #delete $CHAIN_ID directory and re-initialize
+                d) compile "$OPTARG" && create_contract_tx && broadcast_tx && wait_for_confirmation && verify_bytecode;;  
+                t) call_contract_w_tran "$OPTARG";; #call the contract, creating and committing transaction to the chain
+                p) call_contract_no_tran "$OPTARG";;#call the contract, without affecting blockchain state
+                h|*) usage;;
+            esac
+        done
 
    Sample contract used:
           $CONTRACT_CODE
@@ -57,6 +57,14 @@ EOF
    exit 1;
 }
 
+strip_quotes(){
+    sed 's/\"//g'
+    #local s=$1
+    #s="${s%\"}"
+    #s="${s#\"}"
+
+    #echo $s
+}
 
 
 ########################################
@@ -155,12 +163,9 @@ compile() {
 EOF
     )
     # the compile server returns the bytecode (in base64) and the abi (json)
-    BYTECODE=`echo $RESULT | jq .bytecode`
+    BYTECODE=`echo $RESULT | jq .bytecode|strip_quotes`
     ABI=`echo $RESULT | jq .abi`
 
-    # trim quotes
-    BYTECODE="${BYTECODE%\"}"
-    BYTECODE="${BYTECODE#\"}"
 
     # convert bytecode to hex
     if [ "$(uname)" == "Darwin" ]; then
@@ -187,6 +192,14 @@ EOF
     #ABI is needed later in order to call a contract! (must be preserved between compile and execute calls - BAD!)
 }
 
+get_pubkey(){
+    echo "get_pubkey()"
+    #can also do: PUBKEY=`eris-keys pub --addr=$ADDRESS`
+    PUBKEY=$(curl -X POST --data @- --silent $ERIS_KEYS_HOST/pub <<EOF |jq .Response | strip_quotes
+    {"addr":"$ADDRESS"} 
+EOF
+    )
+}
 
 
 #################################################################
@@ -205,7 +218,7 @@ EOF
     echo "NONCE:$NONCE"
 
     # some variables for the call tx
-    CALLTX_TYPE=2 # each tx has a type (they can be found in github.com/tendermint/tendermint/types/tx.go)
+    CALLTX_TYPE=2 # each tx has a type (they can be found in https://github.com/tendermint/tendermint/blob/develop/types/tx.go. 2=TxTypeCall 
     FEE=0
     GAS=1000
     AMOUNT=1
@@ -233,9 +246,7 @@ EOM
     )
 
     echo "SIGNATURE:$SIGNATURE"
-    # we're going to need the pubkey 
-    #(the pubkey can also be fetched via a curl request to $ERIS_KEYS_HOST/pub with post body {"addr":"$ADDRESS"} 
-    PUBKEY=`eris-keys pub --addr=$ADDRESS`
+    get_pubkey
 
     # now we can actually construct the transaction (it's just the sign bytes plus the pubkey and signature!)
     # since it's a CallTx with an empty address, a new contract will be created from the data (the bytecode)
@@ -269,10 +280,8 @@ broadcast_tx() {
     echo "JSON DATA:$JSON_DATA"
 
     # broadcast the transaction to the chain!
-    CONTRACT_ADDRESS=`curl --silent -X POST -d "${JSON_DATA}" "$ERISDB_HOST" --header "Content-Type:application/json" | jq .result[1].receipt.contract_addr`
+    CONTRACT_ADDRESS=`curl --silent -X POST -d "${JSON_DATA}" "$ERISDB_HOST" --header "Content-Type:application/json" | jq .result[1].receipt.contract_addr|strip_quotes`
 
-    CONTRACT_ADDRESS="${CONTRACT_ADDRESS%\"}"
-    CONTRACT_ADDRESS="${CONTRACT_ADDRESS#\"}"
 
     echo "CONTRACT_ADDRESS:$CONTRACT_ADDRESS"
     echo "CONTRACT_ADDRESS~$CONTRACT_ADDRESS" >> $ABIFILE
@@ -304,11 +313,7 @@ wait_for_confirmation() {
 #############################################
 verify_bytecode(){
     echo "verify_bytecode()"
-    CODE=`curl -X GET 'http://'"$ERISDB_HOST"'/get_account?address="'"$CONTRACT_ADDRESS"'"' --silent | jq ."result"[1].account.code`
-
-    # strip quotes
-    CODE="${CODE%\"}"
-    CODE="${CODE#\"}"
+    CODE=`curl -X GET 'http://'"$ERISDB_HOST"'/get_account?address="'"$CONTRACT_ADDRESS"'"' --silent | jq ."result"[1].account.code|strip_quotes`
 
     echo "CODE AT CONTRACT:$CODE"
 
@@ -324,25 +329,21 @@ verify_bytecode(){
     fi
 }
 
-##################################################################
-## Step 7 - Create and Sign Transaction for Talking to Contract ##
-##################################################################
-call_contract_w_tran() {
+parse_abi_file(){
+    echo "parse_abi_file()"
     local abifile=$1
     if [ ! -r "$abifile" ]; then echo "ERROR: abifile $abifile does not exist, exiting 1"; exit 1;fi
 
-    local ABI=`cat $abifile|grep -w ABI|cut -f2 -d~`
-    local CONTRACT_ADDRESS=`cat $abifile|grep -w CONTRACT_ADDRESS|cut -f2 -d~`
-    local ADDRESS=`cat $abifile|grep -w ADDRESS|cut -f2 -d~`
-    echo "call_contract_w_tran() CONTRACT_ADDRESS=$CONTRACT_ADDRESS, abifile=$abifile,ABI=$ABI"
+    ABI=`cat $abifile|grep -w ABI|cut -f2 -d~`
+    CONTRACT_ADDRESS=`cat $abifile|grep -w CONTRACT_ADDRESS|cut -f2 -d~`
+    ADDRESS=`cat $abifile|grep -w ADDRESS|cut -f2 -d~`
 
-    # some variables for the call tx
-    FEE=0
-    GAS=1000
-    AMOUNT=1
+    echo "parse_abi_file() ADDRESS=$ADDRESS,CONTRACT_ADDRESS=$CONTRACT_ADDRESS, abifile=$abifile,ABI=$ABI"
+}
 
-    # we are going to call the "add" function of our contract
-    # and use it to add two numbers
+format_data() {
+    echo "format_data()"
+    # we are going to call the "add" function of our contract  and use it to add two numbers
     FUNCTION="add"
     ARG1="25"
     ARG2="37"
@@ -360,15 +361,36 @@ call_contract_w_tran() {
 
     DATA=`eris-abi pack --input file <(echo $ABI) $FUNCTION $ARG1 $ARG2`
     DATA=`eris-abi pack --input file <(echo $ABI) $FUNCTION $ARG1 $ARG2` 
+}
 
-    #can also do: PUBKEY=`eris-keys pub --addr=$ADDRESS`
-    PUBKEY=$(curl -X POST --data @- --silent $ERIS_KEYS_HOST/pub <<EOF |jq .Response
-    {"addr":"$ADDRESS"} 
-EOF
-    )
-    # strip quotes
-    PUBKEY="${PUBKEY%\"}"
-    PUBKEY="${PUBKEY#\"}"
+
+
+verify_result() {
+    echo "verify_result()"
+    # convert it from hex to int
+    SUM_GOT=`echo $((16#$SUM_GOT))`
+
+    if [[ "$SUM_GOT" != "$SUM_EXPECTED" ]]; then
+            echo "SMART CONTRACT ADDITION TX FAILED"
+            echo "GOT $SUM_GOT"
+            echo "EXPECTED $SUM_EXPECTED"
+    else
+            echo 'SMART CONTRACT ADDITION TX SUCCEEDED!' 
+            echo "$ARG1 + $ARG2 = $SUM_GOT"
+    fi
+}
+
+
+##################################################################
+## Step 7 - Create and Sign Transaction for Talking to Contract ##
+##################################################################
+call_contract_w_tran() {
+    echo "call_contract_w_tran()"
+
+    # some variables for the call tx
+    FEE=0
+    GAS=1000
+    AMOUNT=1
 
     echo "PUBKEY=$PUBKEY.  DATA FOR CONTRACT CALL:$DATA"
 
@@ -381,25 +403,13 @@ EOF
 
     echo "cmd=$cmd"
     RESULT=`eval "$cmd"`
-    #RESULT=`mintx call --node-addr=$ERISDB_HOST --chainID=$CHAIN_ID --to=$CONTRACT_ADDRESS --amt=$AMOUNT --fee=$FEE --gas=$GAS --data=$DATA --pubkey=$PUBKEY --sign --broadcast --wait`
 
     echo "result=$RESULT"
 
     # grab the return value
     SUM_GOT=`echo "$RESULT" | grep "Return Value:" | awk '{print $3}' | sed 's/^0*//'`
 
-    # convert it from hex to int
-    SUM_GOT=`echo $((16#$SUM_GOT))`
-
-    if [[ "$SUM_GOT" != "$SUM_EXPECTED" ]]; then
-            echo "SMART CONTRACT ADDITION TX FAILED"
-            echo "GOT $SUM_GOT"
-            echo "EXPECTED $SUM_EXPECTED"
-    else
-            echo 'SMART CONTRACT ADDITION TX SUCCEEDED!' 
-            echo "$ARG1 + $ARG2 = $SUM_GOT"
-    fi
-    echo ""
+    verify_result
 }
 
 ##################################################################
@@ -409,33 +419,23 @@ EOF
 # Such queries are only "simulated calls", in that there is no transaction (or signature) required, and hence they have no effect on the blockchain state.
 call_contract_no_tran() {
     echo "call_contract_no_tran()"
-    SUM_GOT=`curl -X GET 'http://'"$ERISDB_HOST"'/call?fromAddress="'"$ADDRESS"'"&toAddress="'"$CONTRACT_ADDRESS"'"&data="'"$DATA"'"' --silent | jq ."result"[1].return`
+    SUM_GOT=`curl -X GET 'http://'"$ERISDB_HOST"'/call?fromAddress="'"$ADDRESS"'"&toAddress="'"$CONTRACT_ADDRESS"'"&data="'"$DATA"'"' --silent | jq ."result"[1].return|strip_quotes`
 
     # strip quotes
-    SUM_GOT="${SUM_GOT%\"}"
-    SUM_GOT="${SUM_GOT#\"}"
+    #SUM_GOT="${SUM_GOT%\"}"
+    #SUM_GOT="${SUM_GOT#\"}"
 
-    # convert it from hex to int
-    SUM_GOT=`echo $((16#$SUM_GOT))`
-
-    if [[ "$SUM_GOT" != "$SUM_EXPECTED" ]]; then
-            echo "SMART CONTRACT ADDITION QUERY FAILED"
-            echo "GOT $SUM_GOT"
-            echo "EXPECTED $SUM_EXPECTED"
-    else
-            echo 'SMART CONTRACT ADDITION QUERY SUCCEEDED!'
-            echo "$ARG1 + $ARG2 = $SUM_GOT"
-    fi
+    verify_result
 }
 
-while getopts "c:isd:t:ph" opt; do
+while getopts "c:isd:t:p:h" opt; do
     case "$opt" in
         c) CHAIN_ID="$OPTARG";; #default is $CHAIN_ID
         i) do_installs;;  #install software
         s) kill_all && start_chain;; #delete $CHAIN_ID directory and re-initialize
         d) compile "$OPTARG" && create_contract_tx && broadcast_tx && wait_for_confirmation && verify_bytecode;;  
-        t) call_contract_w_tran "$OPTARG";; #call the contract, creating and committing transaction to the chain
-        p) call_contract_no_tran;;#call the contract, without affecting blockchain state
+        t) parse_abi_file "$OPTARG" && format_data && get_pubkey && call_contract_w_tran ;; #call the contract, creating and committing transaction to the chain
+        p) parse_abi_file "$OPTARG" && format_data && call_contract_no_tran;; #call the contract, without affecting blockchain state
         h|*) usage;;
     esac
 done
